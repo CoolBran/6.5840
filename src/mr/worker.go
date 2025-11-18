@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net/rpc"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -26,9 +27,38 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	for {
+		task := getTask()
+
+		switch task.taskType {
+		case MapPhase:
+			doMapTask(task, mapf)
+		case ReducePhase:
+			doReduceTask(task, reducef)
+		case WaitPhase:
+			time.Sleep(5 * time.Second)
+		case FinishPhase:
+			return
+		}
+	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+
+}
+
+func getTask() task4Assign {
+	args := ExampleArgs{}
+	reply := task4Assign{}
+	call("Coordinator.AssignTask", &args, &reply)
+	return reply
+}
+
+func doMapTask(task task4Assign, mapf func(string, string) []KeyValue) {
+
+}
+
+func doReduceTask(task task4Assign, reducef func(string, []string) string) {
 
 }
 

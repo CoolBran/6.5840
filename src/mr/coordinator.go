@@ -110,8 +110,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.taskQueue = make(chan *task4Assign, max(len(files), nReduce))
 	c.taskMeta = make(map[int]*coordinateTask)
 	c.intermediates = make([][]string, nReduce)
+	c.createMapTasks()
 
 	c.server() //don't carry on process 不是占有程序（让相应的gorutine结束）的原因，
+	go c.checkTimeOut()
 	return &c
 }
 
@@ -147,6 +149,50 @@ func (c *Coordinator) createReduceTasks() {
 	}
 }
 
+func (c *Coordinator) AssignTask(args *ExampleArgs, reply *task4Assign) {
+	mu.Lock()
+	defer mu.Unlock()
+	if len(c.taskQueue) > 0 {
+		*reply = *<-c.taskQueue //a deep copy （task is a go struct value type（not reference type））
+		c.taskMeta[reply.taskID].taskStatus = Running
+		c.taskMeta[reply.taskID].startTime = time.Now()
+	} else if c.coordinatePhase == FinishPhase {
+		*reply = task4Assign{
+			taskType: FinishPhase,
+		}
+	} else {
+		*reply = task4Assign{
+			taskType: WaitPhase,
+		}
+	}
+}
+
+func (c *Coordinator) TaskCompleted(task *task4Assign, reply *ExampleReply) {
+	mu.Lock()
+	defer mu.Unlock()
+	if task.taskType != c.coordinatePhase || c.taskMeta[task.taskID].taskStatus == Finished {
+		return
+	}
+	c.taskMeta[task.taskID].taskStatus = Finished
+	c.processTaskResult(task)
+}
+
+func (c *Coordinator) processTaskResult(task *task4Assign) {
+	switch task.taskType {
+	case MapPhase:
+		for reduceTaskID, filePath := range task.intermediates {
+			c.intermediates[reduceTaskID] = append(c.intermediates[reduceTaskID], filePath)
+		}
+		if c.phaseTasksFinished() {
+			c.coordinatePhase = ReducePhase
+			c.createReduceTasks()
+		}
+	case ReducePhase:
+		//todo: write to output file
+		c.coordinatePhase = FinishPhase
+	}
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -161,4 +207,16 @@ func (c *Coordinator) phaseTasksFinished() bool {
 		}
 	}
 	return true
+}
+
+func (c *Coordinator) checkTimeOut() {
+	for _, task := range c.taskMeta {
+		mu.Lock()
+		time.Sleep(5 * time.Second)
+		if task.taskStatus == Running && time.Since(task.startTime) > 10*time.Second {
+			task.taskStatus = Idle
+			c.taskQueue <- task.taskReference
+		}
+		mu.Unlock()
+	}
 }
