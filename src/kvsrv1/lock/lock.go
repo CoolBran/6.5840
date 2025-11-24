@@ -31,6 +31,7 @@ func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	return lk
 }
 
+// ck.Get && ck.Put have the retry
 func (lk *Lock) Acquire() {
 	// Your code here
 
@@ -46,7 +47,9 @@ func (lk *Lock) Acquire() {
 	// 	}
 	// 	time.Sleep(100 * time.Millisecond)
 	// }
+	// }
 
+	//Acquire need retry (Spinlock: 自旋锁)
 	for {
 		value, version, ok := lk.ck.Get(lk.lockName)
 		if ok == rpc.ErrNoKey || (ok == rpc.OK && value == "") { //think of the case legal is more correct
@@ -64,21 +67,21 @@ func (lk *Lock) Acquire() {
 
 func (lk *Lock) Release() {
 	// Your code here
-	value, version, ok := lk.ck.Get(lk.lockName)
-	if ok == rpc.OK && value == lk.locker {
-		lk.ck.Put(lk.lockName, "", version)
-	}
 
+	//Release but not Acquire first[the case of reason wrong]
 	// for {
-	// 	value, version, err := lk.ck.Get(lk.lockName)
-	// 	if err == rpc.OK && value == lk.locker {
-	// 		err = lk.ck.Put(lk.lockName, "", version)
-
+	// 	value, version, ok := lk.ck.Get(lk.lockName)
+	// 	if ok == rpc.OK && value == lk.locker {
+	// 		err := lk.ck.Put(lk.lockName, "", version) //block
 	// 		if err == rpc.OK {
 	// 			return
 	// 		}
-	// 	} else {
-	// 		return
 	// 	}
+	// 	time.Sleep(time.Millisecond * 100)
 	// }
+
+	value, version, ok := lk.ck.Get(lk.lockName)
+	if ok == rpc.OK && value == lk.locker {
+		lk.ck.Put(lk.lockName, "", version) //block
+	}
 }

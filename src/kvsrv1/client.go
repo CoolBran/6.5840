@@ -66,20 +66,22 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
 	reply := rpc.PutReply{}
 	ok := false
+	first := true //first4thisPut operator, the first time of rpc[not version equals 0]
 	for {
 		if ok = ck.clnt.Call(ck.server, "KVServer.Put", &rpc.PutArgs{
 			Key:     key,
 			Value:   value,
 			Version: version,
-		}, &reply); ok {
-			if reply.Err == rpc.ErrVersion && version != 0 {
+		}, &reply); ok { //ok (based network)
+			if reply.Err == rpc.ErrVersion && !first { //ErrVersion caused by retry
 				return rpc.ErrMaybe
-			} else if reply.Err == rpc.ErrVersion && version == 0 {
+			} else if reply.Err == rpc.ErrVersion && first {
 				return rpc.ErrVersion
 			} else {
 				return reply.Err
 			}
 		}
+		first = false
 		time.Sleep(time.Millisecond * 100)
 	}
 
