@@ -30,7 +30,7 @@ func makeClntTo(net *labrpc.Network, srvs []string) *Clnt {
 }
 
 // caller must acquire lock
-func (clnt *Clnt) allowedL(server string) bool {
+func (clnt *Clnt) allowedL(server string) bool { // todo： function name description
 	if clnt.srvs == nil {
 		return true
 	}

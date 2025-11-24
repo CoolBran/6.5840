@@ -1,7 +1,10 @@
 package lock
 
 import (
-	"6.5840/kvtest1"
+	"time"
+
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
 )
 
 type Lock struct {
@@ -11,6 +14,8 @@ type Lock struct {
 	// MakeLock().
 	ck kvtest.IKVClerk
 	// You may add code here
+	lockName string
+	locker   string
 }
 
 // The tester calls MakeLock() and passes in a k/v clerk; your code can
@@ -21,13 +26,59 @@ type Lock struct {
 func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	lk := &Lock{ck: ck}
 	// You may add code here
+	lk.lockName = l
+	lk.locker = kvtest.RandValue(8)
 	return lk
 }
 
 func (lk *Lock) Acquire() {
 	// Your code here
+
+	// too many errors in logic
+	// value, version, ok := lk.ck.Get(lk.lockName)
+	// for (ok != rpc.OK && ok != rpc.ErrNoKey) || (value != "" && value != lk.locker) {
+	// 	value, version, ok = lk.ck.Get(lk.lockName)
+	// 	time.Sleep(100 * time.Millisecond)
+	// }
+	// for ok == lk.ck.Put(lk.lockName, lk.locker, version) {
+	// 	if ok == rpc.OK {
+	// 		return
+	// 	}
+	// 	time.Sleep(100 * time.Millisecond)
+	// }
+
+	for {
+		value, version, ok := lk.ck.Get(lk.lockName)
+		if ok == rpc.ErrNoKey || (ok == rpc.OK && value == "") { //think of the case legal is more correct
+			ok = lk.ck.Put(lk.lockName, lk.locker, version)
+
+			if ok == rpc.OK {
+				return
+			}
+		} else if ok == rpc.OK && value == lk.locker {
+			return
+		}
+		time.Sleep(time.Millisecond * 100)
+	}
 }
 
 func (lk *Lock) Release() {
 	// Your code here
+	value, version, ok := lk.ck.Get(lk.lockName)
+	if ok == rpc.OK && value == lk.locker {
+		lk.ck.Put(lk.lockName, "", version)
+	}
+
+	// for {
+	// 	value, version, err := lk.ck.Get(lk.lockName)
+	// 	if err == rpc.OK && value == lk.locker {
+	// 		err = lk.ck.Put(lk.lockName, "", version)
+
+	// 		if err == rpc.OK {
+	// 			return
+	// 		}
+	// 	} else {
+	// 		return
+	// 	}
+	// }
 }
