@@ -52,7 +52,7 @@ func (lk *Lock) Acquire() {
 	//Acquire need retry (Spinlock: 自旋锁)
 	for {
 		value, version, ok := lk.ck.Get(lk.lockName)
-		if ok == rpc.ErrNoKey || (ok == rpc.OK && value == "") { //think of the case legal is more correct
+		if ok == rpc.ErrNoKey || (ok == rpc.OK && value == "") { //think of the case legal is more correct [think of positive case or negative case]
 			ok = lk.ck.Put(lk.lockName, lk.locker, version)
 
 			if ok == rpc.OK {
