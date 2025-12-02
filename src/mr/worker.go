@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
@@ -43,7 +44,11 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 	for {
 		task := getTask()
-		switch task.taskType {
+		fmt.Printf("task: %v, type of task: %d\n", task, task.TaskType)
+		if task.TaskType == Reduce {
+			fmt.Println("get the reduce task")
+		}
+		switch task.TaskType {
 		case Map:
 			mapper(&task, mapf)
 		case Reduce:
@@ -57,29 +62,31 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
-func getTask() task {
+func getTask() Task {
 	arg := ExampleArgs{}
-	task := task{}
+	task := Task{}
 	call("Coordinator.AssignTask", &arg, &task)
+
 	return task
 }
 
-func mapper(task *task, mapf func(string, string) []KeyValue) {
-	content, err := os.ReadFile(task.filename)
+func mapper(task *Task, mapf func(string, string) []KeyValue) {
+	content, err := os.ReadFile(task.Filename)
 	if err != nil {
-		log.Fatalf("Error to ReadFile : %s, err:%v \n", task.filename, err)
+		log.Fatalf("Error to ReadFile : %s, err:%v \n", task.Filename, err)
 	}
-	kvas := mapf(task.filename, string(content))
-	buckets := make([][]KeyValue, task.nReduce)
+	kvas := mapf(task.Filename, string(content))
+	buckets := make([][]KeyValue, task.NReduce)
 	for _, kv := range kvas {
-		hashID := ihash(kv.Key)
+		hashID := ihash(kv.Key) % task.NReduce
 		buckets[hashID] = append(buckets[hashID], kv)
 	}
 	intermediate := make([]string, 0)
-	for i := 0; i < task.nReduce; i++ {
-		intermediate = append(intermediate, writeKVs2LocalFile(task.taskID, i, buckets[i]))
+	for i := 0; i < task.NReduce; i++ {
+		intermediate = append(intermediate, writeKVs2LocalFile(task.TaskID, i, buckets[i]))
 	}
-	task.intermediate = intermediate
+	fmt.Println("intermediate: ", intermediate)
+	task.Intermediate = intermediate
 	completeTask(task)
 }
 
@@ -97,11 +104,11 @@ func writeKVs2LocalFile(x int, y int, kvs []KeyValue) string {
 	}
 	outName := fmt.Sprintf("mr-%d-%d", x, y)
 	os.Rename(tmpFile.Name(), outName)
-	return outName
+	return filepath.Join(dir, outName)
 }
 
-func reducer(task *task, reducef func(string, []string) string) {
-	intermediate := readFiles2KVs(task.intermediate)
+func reducer(task *Task, reducef func(string, []string) string) {
+	intermediate := readFiles2KVs(task.Intermediate)
 
 	sort.Sort(ByKey(intermediate))
 	dir, _ := os.Getwd()
@@ -109,10 +116,8 @@ func reducer(task *task, reducef func(string, []string) string) {
 	if err != nil {
 		log.Fatal("Failed to create temp file", err)
 	}
-	// 这部分代码修改自mrsequential.go
 	i := 0
 	for i < len(intermediate) {
-		//将相同的key放在一起分组合并
 		j := i + 1
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
 			j++
@@ -121,14 +126,12 @@ func reducer(task *task, reducef func(string, []string) string) {
 		for k := i; k < j; k++ {
 			values = append(values, intermediate[k].Value)
 		}
-		//交给reducef，拿到结果
 		output := reducef(intermediate[i].Key, values)
-		//写到对应的output文件
 		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
 		i = j
 	}
 	tempFile.Close()
-	oname := fmt.Sprintf("mr-out-%d", task.taskID)
+	oname := fmt.Sprintf("mr-out-%d", task.TaskID)
 	os.Rename(tempFile.Name(), oname)
 	completeTask(task)
 }
@@ -145,8 +148,10 @@ func readFiles2KVs(files []string) []KeyValue {
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
+				fmt.Println("ERROR Decode kv in readFiles2KVs:", err)
 				break
 			}
+			fmt.Println("read the kv from disk:", kv)
 			kvs = append(kvs, kv)
 		}
 		file.Close()
@@ -155,8 +160,9 @@ func readFiles2KVs(files []string) []KeyValue {
 	return kvs
 }
 
-func completeTask(task *task) {
+func completeTask(task *Task) {
 	reply := ExampleReply{}
+	fmt.Println("the completeTask is: ", task)
 	call("Coordinator.CompleteTask", task, &reply)
 }
 
