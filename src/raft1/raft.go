@@ -51,11 +51,13 @@ type Raft struct {
 	logEntries  []LogEntry
 
 	//volatile state on all servers
-	peersCnt    int
-	role        raftRole
-	vote2Me     map[int]bool //vote for me todo
-	commitIndex int          //index of highest log entry known to be committed (initialized to 0, increases monotonically)
-	lastApplied int          //index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+	heartbeatTime time.Time
+	voteReqFinish chan struct{}
+	peersCnt      int
+	role          raftRole
+	vote2Me       map[int]bool //vote for me todo
+	commitIndex   int          //index of highest log entry known to be committed (initialized to 0, increases monotonically)
+	lastApplied   int          //index of highest log entry applied to state machine (initialized to 0, increases monotonically)
 
 	// //volatile state on leaders
 	nextIndex  map[int]int //for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
@@ -133,19 +135,19 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
-	term         int
-	candidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
-	term        int
-	voteGranted bool
-	voter       int
+	Term        int
+	VoteGranted bool
+	Voter       int
 }
 
 // example RequestVote RPC handler.
@@ -155,42 +157,42 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	//todo
 
-	reply.term = rf.currentTerm
-	reply.voteGranted = false
-	reply.voter = rf.me
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+	reply.Voter = rf.me
 
 	//term smaller than me
-	if args.term < rf.currentTerm {
+	if args.Term < rf.currentTerm {
 		return
 	}
 
 	//already vote
-	if rf.votedFor != -1 && rf.votedFor != args.candidateId {
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		return
 	}
 
 	//log older than me
-	if rf.checkLogOlderMe(args.lastLogTerm, args.lastLogIndex) {
+	if rf.checkLogOlderMe(args.LastLogTerm, args.LastLogIndex) {
 		return
 	}
 
-	rf.votedFor = args.candidateId
-	reply.voteGranted = true
+	rf.votedFor = args.CandidateId
+	reply.VoteGranted = true
 
 }
 
 type AppendEntriesArgs struct {
-	term         int
-	leaderID     int
-	prevLogIndex int
-	prevLogTerm  int
-	entries      []LogEntry
-	leaderCommit int
+	Term         int
+	LeaderID     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	term    int
-	success bool
+	Term    int
+	Success bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -205,6 +207,62 @@ func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
 		return true
 	}
 	return false
+}
+
+func (rf *Raft) sendRequestVoteToAll(index int) {
+
+	logSize := len(rf.logEntries)
+	args := RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: rf.logEntries[logSize-1].Index,
+		LastLogTerm:  rf.logEntries[logSize-1].Term,
+	}
+	reply := RequestVoteReply{}
+	ok := false
+	for i := 0; i < 3; i++ {
+		if ok = rf.sendRequestVote(index, &args, &reply); ok {
+			rf.vote2Me[reply.Voter] = false
+			if reply.VoteGranted {
+				rf.vote2Me[reply.Voter] = true
+			}
+			if len(rf.vote2Me) == rf.peersCnt {
+				rf.voteReqFinish <- struct{}{}
+			}
+			return
+		}
+	}
+	rf.vote2Me[reply.Voter] = false
+	if len(rf.vote2Me) == rf.peersCnt {
+		rf.voteReqFinish <- struct{}{}
+	}
+}
+
+func (rf *Raft) sendEmptyAppendEntriesToAll(index int) {
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderID:     rf.me,
+		PrevLogIndex: rf.logEntries[len(rf.logEntries)-1].Index,
+		PrevLogTerm:  rf.logEntries[len(rf.logEntries)-1].Term,
+		// Entries:      rf.logEntries[len(rf.logEntries)-1:],
+		LeaderCommit: rf.commitIndex,
+	}
+	reply := AppendEntriesReply{}
+	ok := false
+	if ok = rf.sendAppendEntries(index, &args, &reply); ok {
+		rf.matchIndex[index] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[index] = rf.matchIndex[index] + 1
+	}
+}
+
+func (rf *Raft) ifBeLeader() bool {
+	voteCnt := 0
+	for _, vote := range rf.vote2Me {
+		if vote {
+			voteCnt++
+		}
+	}
+	return voteCnt > len(rf.peers)/2
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -289,8 +347,43 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here (3A)
-		// Check if a leader election should be started.
 
+		if time.Since(rf.heartbeatTime) > 400*time.Millisecond {
+			rf.role = candidate
+			rf.currentTerm++
+			rf.votedFor = rf.me
+			rf.vote2Me = make(map[int]bool)
+			rf.vote2Me[rf.me] = true
+			for i := 0; i < rf.peersCnt; i++ {
+				// logSize := len(rf.logEntries)
+				// args := RequestVoteArgs{
+				// 	Term:         rf.currentTerm,
+				// 	CandidateId:  rf.me,
+				// 	LastLogIndex: rf.logEntries[logSize-1].Index,
+				// 	LastLogTerm:  rf.logEntries[logSize-1].Term,
+				// }
+				// reply := RequestVoteReply{}
+				// //use gorutine here todo
+				// if ok := rf.sendRequestVote(i, &args, &reply); ok {
+				// 	if reply.VoteGranted {
+				// 		rf.vote2Me[reply.Voter] = true
+				// 	} else {
+				// 		rf.vote2Me[reply.Voter] = false
+				// 	}
+				// }
+				go rf.sendRequestVoteToAll(i)
+			}
+			//check if be a leader: sendRequestVoteToAll 流程结束判断（todo：有待商榷）
+			<-rf.voteReqFinish
+			if rf.ifBeLeader() {
+				rf.role = leader
+				for i := 0; i < rf.peersCnt; i++ {
+					go rf.sendEmptyAppendEntriesToAll(i)
+				}
+			}
+		}
+
+		//todo: what time
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
