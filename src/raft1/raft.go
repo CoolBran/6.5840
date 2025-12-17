@@ -407,7 +407,7 @@ func (rf *Raft) ticker() {
 		heartbtTime := rf.heartbeatTime
 		rf.mu.Unlock()
 
-		if rf.role == Follower && time.Since(heartbtTime) > 400*time.Millisecond {
+		if rf.role != Leader && time.Since(heartbtTime) > 400*time.Millisecond {
 			rf.mu.Lock()
 			rf.role = Candidate
 			rf.currentTerm++
