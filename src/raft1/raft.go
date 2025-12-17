@@ -53,10 +53,9 @@ type Raft struct {
 
 	//volatile state on all servers
 	heartbeatTime time.Time
-	voteReqFinish chan struct{}
 	peersCnt      int
 	role          raftRole
-	vote2Me       map[int]bool //vote for me todo
+	voteCnt       int
 
 	commitIndex int //index of highest log entry known to be committed (initialized to 0, increases monotonically)
 	lastApplied int //index of highest log entry applied to state machine (initialized to 0, increases monotonically)
@@ -77,7 +76,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
-	isleader = rf.votedFor == rf.me
+	isleader = rf.role == Leader
 	return term, isleader
 }
 
@@ -179,9 +178,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.checkLogOlderMe(args.LastLogTerm, args.LastLogIndex) {
 		return
 	}
-
+	rf.currentTerm = args.Term
 	rf.votedFor = args.CandidateId
+	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
+	rf.heartbeatTime = time.Now()
 	fmt.Printf("me: %v,vote to %v\n", rf.me, args.CandidateId)
 
 }
@@ -203,21 +204,23 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// if args.Term >= rf.currentTerm {
 
-	// }
-	if rf.role != Follower {
+	if args.Term >= rf.currentTerm {
+		rf.heartbeatTime = time.Now()
+		rf.currentTerm = args.Term
 		rf.becomeFollower()
+		reply.Term = rf.currentTerm
+		reply.Success = true
+	} else {
+		reply.Term = rf.currentTerm
+		reply.Success = false
 	}
-
 	//todo
 }
 
 func (rf *Raft) becomeFollower() {
-	rf.heartbeatTime = time.Now()
 	rf.role = Follower
 	rf.votedFor = -1
-	rf.vote2Me = make(map[int]bool)
 }
 
 func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
@@ -252,28 +255,24 @@ func (rf *Raft) sendRequestVoteToOne(index int) {
 	rf.mu.Unlock()
 	reply := RequestVoteReply{}
 	ok := false
-	for i := 0; i < 3; i++ {
-		if ok = rf.sendRequestVote(index, &args, &reply); ok {
-			rf.mu.Lock()
-			rf.vote2Me[reply.Voter] = false
-			if reply.VoteGranted {
-				rf.vote2Me[reply.Voter] = true
+	if ok = rf.sendRequestVote(index, &args, &reply); ok {
+		fmt.Printf("Term: %v|| me: %v ==> get the vote Result: %v,index: %v id: %v\n", rf.currentTerm, rf.me, reply.VoteGranted, index, reply.Voter)
+		rf.mu.Lock()
+		rf.voteCnt++
+		if rf.voteCnt*2 > rf.peersCnt && rf.role == Candidate {
+			rf.role = Leader
+			fmt.Printf("Term: %v|| me: %v ==> become Leader\n", rf.currentTerm, rf.me)
+			rf.votedFor = -1
+			rf.voteCnt = 0
+			for i := 0; i < rf.peersCnt; i++ {
+				if i != rf.me {
+					go rf.sendEmptyAppendEntriesToOne(i)
+				}
 			}
-			if len(rf.vote2Me) == rf.peersCnt {
-				rf.voteReqFinish <- struct{}{}
-			}
-			fmt.Printf("me: %v ==> get the vote Result: %v,index: %v id: %v\n", rf.me, reply.VoteGranted, index, reply.Voter)
-			rf.mu.Unlock()
-			return
 		}
+		rf.mu.Unlock()
+		return
 	}
-	rf.mu.Lock()
-	rf.vote2Me[reply.Voter] = false
-	if len(rf.vote2Me) == rf.peersCnt {
-		rf.voteReqFinish <- struct{}{}
-	}
-	fmt.Printf("me: %v ==> get the vote Result: %v,index: %v id: %v\n", rf.me, reply.VoteGranted, index, reply.Voter)
-	rf.mu.Unlock()
 
 }
 
@@ -296,29 +295,22 @@ func (rf *Raft) sendEmptyAppendEntriesToOne(index int) { //leader use
 	}
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
-	rf.sendAppendEntries(index, &args, &reply)
-}
-
-func (rf *Raft) ifBeLeader() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	voteCnt := 0
-	for _, vote := range rf.vote2Me {
-		if vote {
-			voteCnt++
+	fmt.Printf("Term: %v|| me: %v ==> send empty AppendEntries to id: %v\n", rf.currentTerm, rf.me, index)
+	if ok := rf.sendAppendEntries(index, &args, &reply); ok {
+		if !reply.Success {
+			rf.becomeFollower()
 		}
 	}
-	return voteCnt > len(rf.peers)/2
 }
 
 func (rf *Raft) maintainHearBeat() {
-	rf.mu.Lock()
-	role := rf.role
-	peersCnt := rf.peersCnt
-	rf.mu.Unlock()
 	for {
 		time.Sleep(100 * time.Millisecond)
-		if role != Leader {
+		rf.mu.Lock()
+		role := rf.role
+		peersCnt := rf.peersCnt
+		rf.mu.Unlock()
+		if role == Leader {
 			for i := 0; i < peersCnt; i++ {
 				if i != rf.me {
 					go rf.sendEmptyAppendEntriesToOne(i)
@@ -414,15 +406,15 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		heartbtTime := rf.heartbeatTime
 		rf.mu.Unlock()
+
 		if rf.role == Follower && time.Since(heartbtTime) > 400*time.Millisecond {
 			rf.mu.Lock()
 			rf.role = Candidate
 			rf.currentTerm++
+			rf.voteCnt++
 			rf.votedFor = rf.me
-			rf.vote2Me = make(map[int]bool)
-			rf.vote2Me[rf.me] = true
 			rf.mu.Unlock()
-			fmt.Printf("become candidate && vote to myself: %d\n", rf.me)
+			fmt.Printf("Term: %v || become candidate && vote to myself: %d\n", rf.currentTerm, rf.me)
 			for i := 0; i < rf.peersCnt; i++ {
 				// logSize := len(rf.logEntries)
 				// args := RequestVoteArgs{
@@ -444,20 +436,9 @@ func (rf *Raft) ticker() {
 					go rf.sendRequestVoteToOne(i)
 				}
 			}
-			//check if be a leader: sendRequestVoteToAll 流程结束判断（todo：有待商榷）
-			<-rf.voteReqFinish
-			if rf.ifBeLeader() {
-				rf.role = Leader
-				fmt.Printf("become leader==> me: %v\n", rf.me)
-				for i := 0; i < rf.peersCnt; i++ {
-					if rf.me != i {
-						go rf.sendEmptyAppendEntriesToOne(i)
-					}
-				}
-			}
+
 		}
 
-		//todo: what time
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
@@ -487,10 +468,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logEntries = make([]LogEntry, 0)
 
 	rf.heartbeatTime = time.Now()
-	rf.voteReqFinish = make(chan struct{})
 	rf.peersCnt = len(peers)
 	rf.role = Follower
-	rf.vote2Me = make(map[int]bool)
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
