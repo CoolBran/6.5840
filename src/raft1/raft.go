@@ -22,8 +22,8 @@ import (
 
 type LogEntry struct {
 	Term    int
-	Index   int //first index is 1
-	Content string
+	Index   int         //first index is 1
+	Commnad interface{} //todo: why interface{}
 }
 
 type raftRole int
@@ -243,9 +243,6 @@ func (rf *Raft) becomeLeader() {
 
 func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
 	LogSize := len(rf.logEntries)
-	if LogSize == 0 {
-		return false
-	}
 	if lastLogTerm < rf.logEntries[LogSize-1].Term {
 		return true
 	}
@@ -261,17 +258,12 @@ func (rf *Raft) sendRequestVoteToOneWithLock(index int) {
 
 	rf.mu.Lock()
 	args := RequestVoteArgs{
-		Term:        rf.currentTerm,
-		CandidateId: rf.me,
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: rf.logEntries[logSize-1].Index,
+		LastLogTerm:  rf.logEntries[logSize-1].Term,
 	}
 
-	if logSize == 0 {
-		args.LastLogIndex = 0
-		args.LastLogTerm = 0
-	} else {
-		args.LastLogIndex = rf.logEntries[logSize-1].Index
-		args.LastLogTerm = rf.logEntries[logSize-1].Term
-	}
 	rf.mu.Unlock()
 
 	reply := RequestVoteReply{}
@@ -300,22 +292,18 @@ func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(index int) { //leader use
 		Term:         rf.currentTerm,
 		LeaderID:     rf.me,
 		LeaderCommit: rf.commitIndex,
+		PrevLogIndex: rf.logEntries[logSize-1].Index,
+		PrevLogTerm:  rf.logEntries[logSize-1].Term,
 	}
-
-	if logSize == 0 {
-		args.PrevLogIndex = 0
-		args.PrevLogTerm = 0
-	} else {
-		args.PrevLogIndex = rf.logEntries[logSize-1].Index
-		args.PrevLogTerm = rf.logEntries[logSize-1].Term
-	}
-
 	rf.mu.Unlock()
+
 	reply := AppendEntriesReply{}
-	fmt.Printf("Term: %v|| me: %v ==> send empty AppendEntries to id: %v\n", rf.currentTerm, rf.me, index)
+	//fmt.Printf("Term: %v|| me: %v ==> send empty AppendEntries to id: %v\n", rf.currentTerm, rf.me, index)
 	if ok := rf.sendAppendEntries(index, &args, &reply); ok {
 		if !reply.Success {
+			rf.mu.Lock()
 			rf.becomeFollower()
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -404,9 +392,10 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		rf.mu.Lock()
 		heartbtTime := rf.heartbeatTime
+		role := rf.role
 		rf.mu.Unlock()
 
-		if rf.role != Leader && time.Since(heartbtTime) > 400*time.Millisecond {
+		if role != Leader && time.Since(heartbtTime) > 400*time.Millisecond {
 			rf.startElectionWithLock()
 		}
 
@@ -460,7 +449,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func initARaft(rf *Raft) {
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.logEntries = make([]LogEntry, 0)
+	rf.logEntries = make([]LogEntry, 1)
+	fmt.Println("log[0]: ", rf.logEntries[0])
 
 	rf.heartbeatTime = time.Now()
 	rf.peersCnt = len(rf.peers)
