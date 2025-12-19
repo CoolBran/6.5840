@@ -20,6 +20,19 @@ import (
 	tester "6.5840/tester1"
 )
 
+/*
+	note all
+
+0.[leader electrion:]after send vote request:a.check myself is candidate now. a(true):1.vote, voteCnt++, check become leader now 2.not vote, reply.Term > rf.currentTerm, become follower
+1. a server vote to other: update the heartbeat time, delay the election time(the same partition have candidate)
+2. [important] heartbeat: appendEntries with empty log entry[without log add, use old log entries]
+3. Term divide with log Term
+4. appendEntry divide two type: heartbeat[empty log entry to all] and log add[with log to special server about matchIndex && nextIndex]
+5. matchIndex && nextIndex init, update[update]
+6. after follower vote, update the voteFor, think of when it reset -1(for next vote)
+7. voteFor, voteCnt could reset while use.(Lazy think)
+8. think of the log compaction
+*/
 type LogEntry struct {
 	Term    int
 	Index   int         //first index is 1
@@ -61,8 +74,12 @@ type Raft struct {
 	lastApplied int //index of highest log entry applied to state machine (initialized to 0, increases monotonically)
 
 	// //volatile state on leaders
-	nextIndex  map[int]int //for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-	matchIndex map[int]int //for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+	nextIndex  []int //for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
+	matchIndex []int //for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+
+	applyCh        chan raftapi.ApplyMsg
+	applyCond      *sync.Cond   // condition variable for apply goroutine
+	replicatorCond []*sync.Cond // condition variable for replicator goroutine
 }
 
 // return currentTerm and whether this server
@@ -300,12 +317,17 @@ func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(index int) { //leader use
 	reply := AppendEntriesReply{}
 	//fmt.Printf("Term: %v|| me: %v ==> send empty AppendEntries to id: %v\n", rf.currentTerm, rf.me, index)
 	if ok := rf.sendAppendEntries(index, &args, &reply); ok {
-		if !reply.Success {
+		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
 			rf.mu.Lock()
 			rf.becomeFollower()
 			rf.mu.Unlock()
 		}
 	}
+}
+
+// todo:
+func (rf *Raft) sendAppendEntriesToOneWithLock(index int, args *AppendEntriesArgs) {
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -363,6 +385,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
+	DPrintf("Term: %v || Start() called\n", rf.currentTerm)
 
 	return index, term, isLeader
 }
@@ -435,6 +458,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.applyCh = applyCh
 	initARaft(rf)
 
 	// initialize from state persisted before a crash
@@ -459,8 +483,14 @@ func initARaft(rf *Raft) {
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.nextIndex = make(map[int]int)
-	rf.matchIndex = make(map[int]int)
+	rf.nextIndex = make([]int, rf.peersCnt)
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = 1
+	}
+	rf.matchIndex = make([]int, rf.peersCnt)
+	for i := range rf.matchIndex {
+		rf.matchIndex[i] = 0
+	}
 	fmt.Println("raft struct init finished")
 	go rf.maintainHearBeatWithLock()
 }
@@ -472,7 +502,7 @@ func (rf *Raft) maintainHearBeatWithLock() {
 		role := rf.role
 		peersCnt := rf.peersCnt
 		rf.mu.Unlock()
-		if role == Leader {
+		if role == Leader { //only Leader can send heartbeat
 			for i := range peersCnt {
 				if i != rf.me {
 					//todo: send 1.empty AppendEntries or 2.AppendEntries with log
