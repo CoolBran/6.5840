@@ -25,13 +25,14 @@ import (
 
 0.[leader electrion:]after send vote request:a.check myself is candidate now. a(true):1.vote, voteCnt++, check become leader now 2.not vote, reply.Term > rf.currentTerm, become follower
 1. a server vote to other: update the heartbeat time, delay the election time(the same partition have candidate)
-2. [important] heartbeat: appendEntries with empty log entry[without log add, use old log entries]
-3. Term divide with log Term
+
+2. Term divide with log Term
+3. [important] heartbeat: appendEntries with empty log entry[without log add, use old log entries]
 4. appendEntry divide two type: heartbeat[empty log entry to all] and log add[with log to special server about matchIndex && nextIndex]
-5. matchIndex && nextIndex init, update[update]
-6. after follower vote, update the voteFor, think of when it reset -1(for next vote)
-7. voteFor, voteCnt could reset while use.(Lazy think)
-8. think of the log compaction
+5. matchIndex && nextIndex[init], update[update]
+6. after follower vote, update the voteFor, think of when it reset -1(for next vote) ==> filed voteFor, voteCnt could reset while use.(Lazy think)
+7. think of the Log Compression
+8.
 */
 type LogEntry struct {
 	Term    int
@@ -271,20 +272,13 @@ func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
 
 // sendRequestVoteToOneWithLock --> sendRequestVote(rpc caller) --> RequestVote (rpc callee)
 func (rf *Raft) sendRequestVoteToOneWithLock(index int) {
-	logSize := len(rf.logEntries)
 
 	rf.mu.Lock()
-	args := RequestVoteArgs{
-		Term:         rf.currentTerm,
-		CandidateId:  rf.me,
-		LastLogIndex: rf.logEntries[logSize-1].Index,
-		LastLogTerm:  rf.logEntries[logSize-1].Term,
-	}
-
+	args := rf.genRequestVoteArgs()
 	rf.mu.Unlock()
 
 	reply := RequestVoteReply{}
-	if ok := rf.sendRequestVote(index, &args, &reply); ok {
+	if ok := rf.sendRequestVote(index, args, &reply); ok {
 		rf.mu.Lock()
 		rf.voteCnt++
 		if rf.voteCnt*2 > rf.peersCnt && rf.role == Candidate {
@@ -304,30 +298,38 @@ func (rf *Raft) sendRequestVoteToOneWithLock(index int) {
 // sendEmptyAppendEntriesToOneWithLock(empty, this level decided empty or not) --> sendAppendEntries(rpc caller) --> AppendEntries (rpc callee)
 func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(index int) { //leader use
 	rf.mu.Lock()
-	logSize := len(rf.logEntries)
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderID:     rf.me,
-		LeaderCommit: rf.commitIndex,
-		PrevLogIndex: rf.logEntries[logSize-1].Index,
-		PrevLogTerm:  rf.logEntries[logSize-1].Term,
-	}
+	args := rf.gengenAppendEntriesArgs(rf.getLastLog().Index)
 	rf.mu.Unlock()
 
-	reply := AppendEntriesReply{}
+	reply := &AppendEntriesReply{}
 	//fmt.Printf("Term: %v|| me: %v ==> send empty AppendEntries to id: %v\n", rf.currentTerm, rf.me, index)
-	if ok := rf.sendAppendEntries(index, &args, &reply); ok {
+	if ok := rf.sendAppendEntries(index, args, reply); ok { //net level
 		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
-			rf.mu.Lock()
-			rf.becomeFollower()
-			rf.mu.Unlock()
+			if reply.Term > rf.currentTerm {
+				rf.mu.Lock()
+				rf.becomeFollower()
+				rf.mu.Unlock()
+			}
 		}
+
 	}
 }
 
 // todo:
-func (rf *Raft) sendAppendEntriesToOneWithLock(index int, args *AppendEntriesArgs) {
-
+func (rf *Raft) sendAppendEntriesToOneWithLock(index int) {
+	rf.mu.Lock()
+	args := rf.gengenAppendEntriesArgs(rf.matchIndex[index])
+	rf.mu.Unlock()
+	reply := &AppendEntriesReply{}
+	if ok := rf.sendAppendEntries(index, args, reply); ok { //net level
+		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
+			if reply.Term > rf.currentTerm {
+				rf.mu.Lock()
+				rf.becomeFollower()
+				rf.mu.Unlock()
+			}
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -512,4 +514,35 @@ func (rf *Raft) maintainHearBeatWithLock() {
 		}
 	}
 
+}
+
+func (rf *Raft) getFirstLog() LogEntry {
+	return rf.logEntries[0]
+}
+
+func (rf *Raft) getLastLog() LogEntry {
+	return rf.logEntries[len(rf.logEntries)-1]
+}
+
+func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
+	return &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: rf.getLastLog().Index,
+		LastLogTerm:  rf.getLastLog().Term,
+	}
+}
+
+func (rf *Raft) gengenAppendEntriesArgs(preLogIndex int) *AppendEntriesArgs {
+	firstLogIndex := rf.getFirstLog().Index
+	entries := make([]LogEntry, len(rf.logEntries[preLogIndex-firstLogIndex+1:]))
+	copy(entries, rf.logEntries[preLogIndex-firstLogIndex+1:])
+	return &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderID:     rf.me,
+		PrevLogIndex: preLogIndex,
+		PrevLogTerm:  rf.logEntries[preLogIndex-firstLogIndex].Term,
+		LeaderCommit: rf.commitIndex,
+		Entries:      entries,
+	}
 }
