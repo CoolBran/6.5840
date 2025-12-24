@@ -427,6 +427,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 		Index:   index,
 	})
+	fmt.Printf("[LeaderID:%v], get command:%v\n", rf.me, command)
+	fmt.Printf("[Leader LogEntries size after start append]:%v\n", len(rf.logEntries))
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = index, index+1
 	for peer := range rf.peers {
 		if peer != rf.me {
@@ -523,7 +525,6 @@ func initARaft(rf *Raft) {
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logEntries = make([]LogEntry, 1)
-	fmt.Println("log[0]: ", rf.logEntries[0])
 
 	rf.heartbeatTime = time.Now()
 	rf.peersCnt = len(rf.peers)
@@ -547,7 +548,6 @@ func initARaft(rf *Raft) {
 			go rf.replicator(peer)
 		}
 	}
-	fmt.Println("raft struct init finished")
 	go rf.maintainHearBeatWithLock()
 }
 
@@ -635,7 +635,9 @@ func (rf *Raft) replicator(peer int) {
 	for !rf.killed() {
 		for !rf.needReplicating(peer) {
 			rf.replicatorCond[peer].Wait()
+			fmt.Printf("[signal one]\n")
 		}
+		fmt.Printf("[signal one --> sendAppendEntriesToOneWithLock]\n")
 		rf.sendAppendEntriesToOneWithLock(peer)
 	}
 }
@@ -644,6 +646,6 @@ func (rf *Raft) needReplicating(peer int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// check the logs of peer is behind the leader
-	fmt.Printf("[leader match:%v]peer(%v) match index: %v, leader lastLog:%v\n", rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index, peer, rf.matchIndex[peer], rf.getLastLog().Index)
+	fmt.Printf("[peer(%v) match:%v]peer(%v) match index: %v, leader lastLog:%v\n", rf.me, rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index, peer, rf.matchIndex[peer], rf.getLastLog().Index)
 	return rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
