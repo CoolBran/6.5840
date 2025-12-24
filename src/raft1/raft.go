@@ -37,7 +37,7 @@ import (
 type LogEntry struct {
 	Term    int
 	Index   int         //first index is 1
-	Commnad interface{} //todo: why interface{}
+	Command interface{} //todo: why interface{}
 }
 
 type raftRole int
@@ -223,20 +223,48 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	if args.Term >= rf.currentTerm {
-		rf.heartbeatTime = time.Now() //note: heartbeat, update heartbeat time
-		rf.currentTerm = args.Term    //Term divide with log Term
-		if rf.role != Follower {
-			rf.becomeFollower()
-		}
-		reply.Term = rf.currentTerm
-		reply.Success = true
-	} else {
+	fmt.Printf("[Get Entries] me: %v, LeaderID: %v\n", rf.me, args.LeaderID)
+	//§5.1
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		return
 	}
-	//todo: without content log now
+
+	//normal status
+	rf.heartbeatTime = time.Now() //note: heartbeat, update heartbeat time
+	rf.currentTerm = args.Term    //Term divide with log Term
+	if rf.role != Follower {
+		rf.becomeFollower()
+	}
+	reply.Term = rf.currentTerm
+	reply.Success = true
+	//§5.3 reply false if log doesn't contain an entry at prevLogIndex
+	if args.PrevLogIndex < rf.getFirstLog().Index {
+		reply.Term, reply.Success = rf.currentTerm, false
+		return
+	}
+
+	if !rf.isLogMatched(args.PrevLogIndex, args.PrevLogTerm) {
+		reply.Term, reply.Success = rf.currentTerm, false
+		return
+	}
+
+	//put the log entry into the rf.logEntries
+	fmt.Printf("[get AppendEntries]: entries len == %v\n", len(args.Entries))
+	if len(args.Entries) != 0 {
+		fmt.Printf("[get AppendEntries] me: %v, LeaderID: %v[%v==>[%v:%v]]\n", rf.me, args.LeaderID, rf.getLastLog().Index, args.Entries[0].Index, args.Entries[len(args.Entries)-1].Index)
+	}
+	rf.logEntries = append(rf.logEntries[:args.PrevLogIndex-rf.getFirstLog().Index+1], args.Entries...)
+
+	//commit log index
+	fmt.Printf("[commit log index] me: %v, LeaderID: %v\n", rf.me, args.LeaderID)
+	newCommitIndex := min(args.LeaderCommit, rf.getLastLog().Index)
+	if newCommitIndex > rf.commitIndex {
+		rf.commitIndex = newCommitIndex
+		rf.applyCond.Signal()
+	}
+	reply.Term, reply.Success = rf.currentTerm, true
 }
 
 func (rf *Raft) becomeFollower() {
@@ -296,32 +324,35 @@ func (rf *Raft) sendRequestVoteToOneWithLock(index int) {
 }
 
 // sendEmptyAppendEntriesToOneWithLock(empty, this level decided empty or not) --> sendAppendEntries(rpc caller) --> AppendEntries (rpc callee)
-func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(index int) { //leader use
+func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(peer int) { //leader use
 	rf.mu.Lock()
-	args := rf.gengenAppendEntriesArgs(rf.getLastLog().Index)
+	args := rf.genAppendEntriesArgs(rf.getLastLog().Index)
 	rf.mu.Unlock()
 
 	reply := &AppendEntriesReply{}
+	fmt.Printf("[empty appendEntries]: me: %v, send to %v, logSize: %v,logEntry:%v\n", rf.me, peer, len(args.Entries), args.Entries)
 	//fmt.Printf("Term: %v|| me: %v ==> send empty AppendEntries to id: %v\n", rf.currentTerm, rf.me, index)
-	if ok := rf.sendAppendEntries(index, args, reply); ok { //net level
+	if ok := rf.sendAppendEntries(peer, args, reply); ok { //net level
 		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
+			rf.mu.Lock()
 			if reply.Term > rf.currentTerm {
-				rf.mu.Lock()
 				rf.becomeFollower()
-				rf.mu.Unlock()
 			}
+			rf.mu.Unlock()
 		}
 
 	}
 }
 
 // todo:
-func (rf *Raft) sendAppendEntriesToOneWithLock(index int) {
+func (rf *Raft) sendAppendEntriesToOneWithLock(peer int) {
+	fmt.Println("[not empty sendEntries]")
 	rf.mu.Lock()
-	args := rf.gengenAppendEntriesArgs(rf.matchIndex[index])
+	args := rf.genAppendEntriesArgs(rf.matchIndex[peer])
 	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
-	if ok := rf.sendAppendEntries(index, args, reply); ok { //net level
+	fmt.Printf("[not empty:appendEntries]: me: %v, send to %v, logSize: %v,logEntry:%v\n", rf.me, peer, len(args.Entries), args.Entries)
+	if ok := rf.sendAppendEntries(peer, args, reply); ok { //net level
 		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
 			if reply.Term > rf.currentTerm {
 				rf.mu.Lock()
@@ -387,7 +418,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
+	rf.mu.Lock()
 	DPrintf("Term: %v || Start() called\n", rf.currentTerm)
+
+	index, term = rf.getLastLog().Index+1, rf.currentTerm
+	rf.logEntries = append(rf.logEntries, LogEntry{
+		Term:    term,
+		Command: command,
+		Index:   index,
+	})
+	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = index, index+1
+	for peer := range rf.peers {
+		if peer != rf.me {
+			rf.replicatorCond[peer].Signal()
+		}
+	}
+	rf.mu.Unlock()
 
 	return index, term, isLeader
 }
@@ -412,7 +458,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here (3A)
 		rf.mu.Lock()
@@ -469,6 +515,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
+	go rf.applier() //start applier goroutine
 	return rf
 }
 
@@ -486,12 +533,19 @@ func initARaft(rf *Raft) {
 	rf.lastApplied = 0
 
 	rf.nextIndex = make([]int, rf.peersCnt)
-	for i := range rf.nextIndex {
-		rf.nextIndex[i] = 1
-	}
+
 	rf.matchIndex = make([]int, rf.peersCnt)
-	for i := range rf.matchIndex {
-		rf.matchIndex[i] = 0
+
+	rf.replicatorCond = make([]*sync.Cond, rf.peersCnt)
+
+	rf.applyCond = sync.NewCond(&rf.mu)
+
+	for peer := range rf.peers {
+		rf.matchIndex[peer], rf.nextIndex[peer] = 0, 1
+		if peer != rf.me {
+			rf.replicatorCond[peer] = sync.NewCond(&sync.Mutex{})
+			go rf.replicator(peer)
+		}
 	}
 	fmt.Println("raft struct init finished")
 	go rf.maintainHearBeatWithLock()
@@ -533,7 +587,7 @@ func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
 	}
 }
 
-func (rf *Raft) gengenAppendEntriesArgs(preLogIndex int) *AppendEntriesArgs {
+func (rf *Raft) genAppendEntriesArgs(preLogIndex int) *AppendEntriesArgs {
 	firstLogIndex := rf.getFirstLog().Index
 	entries := make([]LogEntry, len(rf.logEntries[preLogIndex-firstLogIndex+1:]))
 	copy(entries, rf.logEntries[preLogIndex-firstLogIndex+1:])
@@ -545,4 +599,51 @@ func (rf *Raft) gengenAppendEntriesArgs(preLogIndex int) *AppendEntriesArgs {
 		LeaderCommit: rf.commitIndex,
 		Entries:      entries,
 	}
+}
+
+func (rf *Raft) isLogMatched(index, term int) bool {
+	return index <= rf.getLastLog().Index && term == rf.logEntries[index-rf.getFirstLog().Index].Term //valid index check？
+}
+
+func (rf *Raft) applier() {
+	for !rf.killed() {
+		rf.mu.Lock()
+
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
+		}
+
+		firstLogIndex, commitIndex, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
+		entries := make([]LogEntry, commitIndex-lastApplied)
+		copy(entries, rf.logEntries[lastApplied-firstLogIndex+1:commitIndex-firstLogIndex+1])
+		rf.mu.Unlock()
+		for _, entry := range entries {
+			rf.applyCh <- raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: entry.Index,
+			}
+			rf.mu.Lock()
+			rf.lastApplied = commitIndex
+			rf.mu.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) replicator(peer int) {
+	rf.replicatorCond[peer].L.Lock()
+	for !rf.killed() {
+		for !rf.needReplicating(peer) {
+			rf.replicatorCond[peer].Wait()
+		}
+		rf.sendAppendEntriesToOneWithLock(peer)
+	}
+}
+
+func (rf *Raft) needReplicating(peer int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// check the logs of peer is behind the leader
+	fmt.Printf("[leader match:%v]peer(%v) match index: %v, leader lastLog:%v\n", rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index, peer, rf.matchIndex[peer], rf.getLastLog().Index)
+	return rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
