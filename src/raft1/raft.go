@@ -8,8 +8,9 @@ package raft
 
 import (
 	//	"bytes"
-	"fmt"
+
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,8 +37,8 @@ import (
 */
 type LogEntry struct {
 	Term    int
-	Index   int         //first index is 1
-	Command interface{} //todo: why interface{}
+	Index   int //first index is 1
+	Command interface{}
 }
 
 type raftRole int
@@ -81,6 +82,8 @@ type Raft struct {
 	applyCh        chan raftapi.ApplyMsg
 	applyCond      *sync.Cond   // condition variable for apply goroutine
 	replicatorCond []*sync.Cond // condition variable for replicator goroutine
+
+	// retCh chan struct{}
 }
 
 // return currentTerm and whether this server
@@ -180,19 +183,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//term smaller than me
 	if args.Term < rf.currentTerm {
-		fmt.Printf("[voteFailed, candidateTerm smaller than me]me: %v,deny to vote to %v\n", rf.me, args.CandidateId)
+		DPrintf("[follower:%v][voteFailed, candidateTerm smaller than me]:deny to vote to %v\n", rf.me, args.CandidateId)
 		return
 	}
 
+	//todotodotodotodotodo:see later
+	// if args.Term > rf.currentTerm {
+	// 	rf.becomeFollower()
+	// 	rf.currentTerm = args.Term
+	// }
+
 	//already vote [args.Term >= rf.currentTerm]
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-		fmt.Printf("[voteFailed, already vote]me: %v,deny to vote to %v\n", rf.me, args.CandidateId)
+		DPrintf("[follower:%v][voteFailed, already vote]:deny to vote to %v\n", rf.me, args.CandidateId)
 		return
 	}
 
 	//log older than me
 	if rf.checkLogOlderMe(args.LastLogTerm, args.LastLogIndex) {
-		fmt.Printf("[voteFailed, log older than me]me: %v,deny to vote to %v\n", rf.me, args.CandidateId)
+		DPrintf("[follower:%v][voteFailed, log older than me]:deny to vote to %v\n", rf.me, args.CandidateId)
 		return
 	}
 
@@ -202,7 +211,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
-	fmt.Printf("[voteSuccess]==>me: %v,vote to %v\n", rf.me, args.CandidateId)
+	DPrintf("[follower:%v][voteSuccess]:vote to %v\n", rf.me, args.CandidateId)
 
 }
 
@@ -223,7 +232,6 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("[Get Entries] me: %v, LeaderID: %v\n", rf.me, args.LeaderID)
 	//§5.1
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -251,14 +259,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	//put the log entry into the rf.logEntries
-	fmt.Printf("[get AppendEntries]: entries len == %v\n", len(args.Entries))
-	if len(args.Entries) != 0 {
-		fmt.Printf("[get AppendEntries] me: %v, LeaderID: %v[%v==>[%v:%v]]\n", rf.me, args.LeaderID, rf.getLastLog().Index, args.Entries[0].Index, args.Entries[len(args.Entries)-1].Index)
+	if len(args.Entries) > 0 {
+		DPrintf("[follower:%v][get appendEntries]:lastLog:%v, logEntries:%v\n", rf.me, rf.getLastLog(), args.Entries)
 	}
 	rf.logEntries = append(rf.logEntries[:args.PrevLogIndex-rf.getFirstLog().Index+1], args.Entries...)
-
+	DPrintf("[follower:%v][after appendEntries]:%v\n", rf.me, rf.logEntries)
 	//commit log index
-	fmt.Printf("[commit log index] me: %v, LeaderID: %v\n", rf.me, args.LeaderID)
 	newCommitIndex := min(args.LeaderCommit, rf.getLastLog().Index)
 	if newCommitIndex > rf.commitIndex {
 		rf.commitIndex = newCommitIndex
@@ -277,14 +283,14 @@ func (rf *Raft) becomeCandidate() {
 	rf.role = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	rf.voteCnt++
+	rf.voteCnt = 1 //voteCnt assign 1, doesn't use ++
 }
 
 func (rf *Raft) becomeLeader() {
 	rf.role = Leader
 	rf.votedFor = -1
 	rf.voteCnt = 0
-	fmt.Printf("Term: %v|| me: %v ==> become Leader\n", rf.currentTerm, rf.me)
+	DPrintf("[Candidate==>Leader:%v]:Term: %v \n", rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
@@ -306,18 +312,20 @@ func (rf *Raft) sendRequestVoteToOneWithLock(index int) {
 	rf.mu.Unlock()
 
 	reply := RequestVoteReply{}
-	if ok := rf.sendRequestVote(index, args, &reply); ok {
-		rf.mu.Lock()
-		rf.voteCnt++
-		if rf.voteCnt*2 > rf.peersCnt && rf.role == Candidate {
-			rf.becomeLeader()
-			for i := 0; i < rf.peersCnt; i++ {
-				if i != rf.me {
-					go rf.sendEmptyAppendEntriesToOneWithLock(i)
+	if ok := rf.sendRequestVote(index, args, &reply); ok { //net level
+		if reply.VoteGranted {
+			rf.mu.Lock()
+			rf.voteCnt++
+			if rf.voteCnt*2 > rf.peersCnt && rf.role == Candidate {
+				rf.becomeLeader()
+				for i := 0; i < rf.peersCnt; i++ {
+					if i != rf.me {
+						go rf.sendEmptyAppendEntriesToOneWithLock(i)
+					}
 				}
 			}
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
 		return
 	}
 
@@ -330,8 +338,7 @@ func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(peer int) { //leader use
 	rf.mu.Unlock()
 
 	reply := &AppendEntriesReply{}
-	fmt.Printf("[empty appendEntries]: me: %v, send to %v, logSize: %v,logEntry:%v\n", rf.me, peer, len(args.Entries), args.Entries)
-	//fmt.Printf("Term: %v|| me: %v ==> send empty AppendEntries to id: %v\n", rf.currentTerm, rf.me, index)
+	DPrintf("[Leader:%v][empty appendEntries]:send to %v, logSize: %v,logEntry:%v\n", rf.me, peer, len(args.Entries), args.Entries)
 	if ok := rf.sendAppendEntries(peer, args, reply); ok { //net level
 		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
 			rf.mu.Lock()
@@ -344,22 +351,30 @@ func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(peer int) { //leader use
 	}
 }
 
-// todo:
+// todo: important
 func (rf *Raft) sendAppendEntriesToOneWithLock(peer int) {
-	fmt.Println("[not empty sendEntries]")
 	rf.mu.Lock()
 	args := rf.genAppendEntriesArgs(rf.matchIndex[peer])
 	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
-	fmt.Printf("[not empty:appendEntries]: me: %v, send to %v, logSize: %v,logEntry:%v\n", rf.me, peer, len(args.Entries), args.Entries)
+	DPrintf("[Leader:%v][not empty:appendEntries]:send to %v, logSize: %v,logEntry:%v\n", rf.me, peer, len(args.Entries), args.Entries)
 	if ok := rf.sendAppendEntries(peer, args, reply); ok { //net level
+		rf.mu.Lock()
 		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
 			if reply.Term > rf.currentTerm {
-				rf.mu.Lock()
 				rf.becomeFollower()
-				rf.mu.Unlock()
+			} else if reply.Term == rf.currentTerm {
+				rf.nextIndex[peer]--
+				rf.matchIndex[peer]--
 			}
+		} else { //append entries success
+			rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+			rf.advanceCommitIndexForLeader()
 		}
+		rf.mu.Unlock()
+
+		// +++++++++++++++++++
 	}
 }
 
@@ -419,24 +434,28 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (3B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	DPrintf("Term: %v || Start() called\n", rf.currentTerm)
-
+	if rf.role != Leader {
+		return -1, -1, false
+	}
+	DPrintf("[Leader:%v], get command:%v\n", rf.me, command)
 	index, term = rf.getLastLog().Index+1, rf.currentTerm
 	rf.logEntries = append(rf.logEntries, LogEntry{
 		Term:    term,
 		Command: command,
 		Index:   index,
 	})
-	fmt.Printf("[LeaderID:%v], get command:%v\n", rf.me, command)
-	fmt.Printf("[Leader LogEntries size after start append]:%v\n", len(rf.logEntries))
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = index, index+1
 	for peer := range rf.peers {
 		if peer != rf.me {
 			rf.replicatorCond[peer].Signal()
 		}
 	}
-	rf.mu.Unlock()
-
+	// for rf.commitIndex < index {
+	// 	rf.applyCond.Wait()
+	// }
+	// return not wait most of peer append the log
 	return index, term, isLeader
 }
 
@@ -482,7 +501,7 @@ func (rf *Raft) ticker() {
 func (rf *Raft) startElectionWithLock() {
 	rf.mu.Lock()
 	rf.becomeCandidate()
-	fmt.Printf("Term: %v || become candidate && vote to myself: %d\n", rf.currentTerm, rf.me)
+	DPrintf("[follower==>candidate:%v]:Term: %v\n", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	for i := 0; i < rf.peersCnt; i++ {
 		if rf.me != i {
@@ -510,7 +529,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	rf.applyCh = applyCh
 	initARaft(rf)
-
+	DPrintf("[after Init]: log[%v]\n", rf.logEntries)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
@@ -611,6 +630,7 @@ func (rf *Raft) applier() {
 
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCond.Wait()
+			DPrintf("[follower:%v][commit log index]: lastApplied==>%v commitIndex==>%v\n", rf.me, rf.lastApplied, rf.commitIndex)
 		}
 
 		firstLogIndex, commitIndex, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
@@ -623,10 +643,14 @@ func (rf *Raft) applier() {
 				Command:      entry.Command,
 				CommandIndex: entry.Index,
 			}
-			rf.mu.Lock()
-			rf.lastApplied = commitIndex
-			rf.mu.Unlock()
+
 		}
+		rf.mu.Lock()
+		rf.lastApplied = commitIndex
+		// if rf.role == Leader && rf.lastApplied == rf.getLastLog().Index {
+		// 	rf.retCh <- struct{}{}
+		// }
+		rf.mu.Unlock()
 	}
 }
 
@@ -635,9 +659,7 @@ func (rf *Raft) replicator(peer int) {
 	for !rf.killed() {
 		for !rf.needReplicating(peer) {
 			rf.replicatorCond[peer].Wait()
-			fmt.Printf("[signal one]\n")
 		}
-		fmt.Printf("[signal one --> sendAppendEntriesToOneWithLock]\n")
 		rf.sendAppendEntriesToOneWithLock(peer)
 	}
 }
@@ -646,6 +668,21 @@ func (rf *Raft) needReplicating(peer int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// check the logs of peer is behind the leader
-	fmt.Printf("[peer(%v) match:%v]peer(%v) match index: %v, leader lastLog:%v\n", rf.me, rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index, peer, rf.matchIndex[peer], rf.getLastLog().Index)
+	DPrintf("[leader(%v) match:%v]peer(%v) match index: %v, leader lastLog:%v\n", rf.me, rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index, peer, rf.matchIndex[peer], rf.getLastLog().Index)
 	return rf.role == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
+}
+
+func (rf *Raft) advanceCommitIndexForLeader() {
+	n := len(rf.matchIndex)
+	sortMatchIndex := make([]int, n)
+	copy(sortMatchIndex, rf.matchIndex)
+	sort.Ints(sortMatchIndex)
+	newCommitIndex := sortMatchIndex[n-(n/2+1)]
+	if newCommitIndex > rf.commitIndex {
+		if rf.isLogMatched(newCommitIndex, rf.currentTerm) {
+			DPrintf("{Node %v} advances commitIndex from %v to %v in term %v\n", rf.me, rf.commitIndex, newCommitIndex, rf.currentTerm)
+			rf.commitIndex = newCommitIndex
+			rf.applyCond.Signal()
+		}
+	}
 }
