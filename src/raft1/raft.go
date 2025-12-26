@@ -9,6 +9,7 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -100,6 +102,15 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+func (rf *Raft) encodeState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logEntries)
+	return w.Bytes()
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -116,6 +127,7 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	rf.persister.Save(rf.encodeState(), nil)
 }
 
 // restore previously persisted state.
@@ -136,6 +148,16 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var logs []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		DPrintf("{Node %v} fails to decode persisted state", rf.me)
+	}
+	rf.currentTerm, rf.votedFor, rf.logEntries = currentTerm, votedFor, logs
+	rf.lastApplied, rf.commitIndex = rf.getFirstLog().Index, rf.getFirstLog().Index
 }
 
 // how many bytes in Raft's persisted log?
@@ -191,6 +213,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm { //voteFor reset when new Term
 		rf.becomeFollower()
 		rf.currentTerm = args.Term
+		rf.persist()
 	}
 
 	//already vote [args.Term >= rf.currentTerm]
@@ -207,6 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.currentTerm = args.Term
 	rf.votedFor = args.CandidateId
+	rf.persist()
 	rf.heartbeatTime = time.Now() //note: vote to other, update heartbeat time, delay the leader election time
 
 	reply.Term = rf.currentTerm
@@ -242,6 +266,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//normal status
 	rf.heartbeatTime = time.Now() //note: heartbeat, update heartbeat time
 	rf.currentTerm = args.Term    //Term divide with log Term
+	rf.persist()
 	if rf.role != Follower {
 		rf.becomeFollower()
 	}
@@ -263,6 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("[follower:%v][get appendEntries]:lastLog:%v, logEntries:%v\n", rf.me, rf.getLastLog(), args.Entries)
 	}
 	rf.logEntries = append(rf.logEntries[:args.PrevLogIndex-rf.getFirstLog().Index+1], args.Entries...)
+	rf.persist()
 	DPrintf("[follower:%v][after appendEntries]:%v\n", rf.me, rf.logEntries)
 	//commit log index
 	newCommitIndex := min(args.LeaderCommit, rf.getLastLog().Index)
@@ -274,7 +300,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) becomeFollower() {
-	rf.votedFor = -1 //todo: reset vote, time think
+	rf.votedFor = -1 //todo: reset vote, time think(while term change)
+	rf.persist()
 	rf.voteCnt = 0
 	rf.role = Follower
 }
@@ -283,26 +310,28 @@ func (rf *Raft) becomeCandidate() {
 	rf.role = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.voteCnt = 1 //voteCnt assign 1, doesn't use ++
 }
 
 func (rf *Raft) becomeLeader() {
 	rf.role = Leader
-	rf.votedFor = -1
 	rf.voteCnt = 0
+	rf.persist()
 	DPrintf("[Candidate==>Leader:%v]:Term: %v \n", rf.me, rf.currentTerm)
 }
 
-func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
-	LogSize := len(rf.logEntries)
-	if lastLogTerm < rf.logEntries[LogSize-1].Term {
-		return true
-	}
-	if lastLogIndex < rf.logEntries[LogSize-1].Index {
-		return true
-	}
-	return false
-}
+// Error Error
+// func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
+// 	LogSize := len(rf.logEntries)
+// 	if lastLogTerm < rf.logEntries[LogSize-1].Term {
+// 		return true
+// 	}
+// 	if lastLogIndex < rf.logEntries[LogSize-1].Index {
+// 		return true
+// 	}
+// 	return false
+// }
 
 func (rf *Raft) isLogUpToDate(index, term int) bool {
 	lastLog := rf.getLastLog()
@@ -451,6 +480,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 		Index:   index,
 	})
+	rf.persist()
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = index, index+1
 	for peer := range rf.peers {
 		if peer != rf.me {
@@ -533,10 +563,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.applyCh = applyCh
-	initARaft(rf)
+	initARaft(rf, persister)
+
 	DPrintf("[after Init]: log[%v]\n", rf.logEntries)
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	// rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -545,7 +576,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func initARaft(rf *Raft) {
+func initARaft(rf *Raft, persister *tester.Persister) {
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logEntries = make([]LogEntry, 1)
@@ -562,6 +593,8 @@ func initARaft(rf *Raft) {
 	rf.matchIndex = make([]int, rf.peersCnt)
 
 	rf.replicatorCond = make([]*sync.Cond, rf.peersCnt)
+
+	rf.readPersist(persister.ReadRaftState())
 
 	rf.applyCond = sync.NewCond(&rf.mu)
 
