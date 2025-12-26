@@ -609,7 +609,7 @@ func initARaft(rf *Raft, persister *tester.Persister) {
 }
 
 func (rf *Raft) maintainHearBeatWithLock() {
-	for {
+	for !rf.killed() {
 		time.Sleep(100 * time.Millisecond)
 		rf.mu.Lock()
 		role := rf.role
