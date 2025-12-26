@@ -187,11 +187,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	//todotodotodotodotodo:see later
-	// if args.Term > rf.currentTerm {
-	// 	rf.becomeFollower()
-	// 	rf.currentTerm = args.Term
-	// }
+	//todotodotodotodotodo:see later important(think more)
+	if args.Term > rf.currentTerm { //voteFor reset when new Term
+		rf.becomeFollower()
+		rf.currentTerm = args.Term
+	}
 
 	//already vote [args.Term >= rf.currentTerm]
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
@@ -200,7 +200,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	//log older than me
-	if rf.checkLogOlderMe(args.LastLogTerm, args.LastLogIndex) {
+	if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		DPrintf("[follower:%v][voteFailed, log older than me]:deny to vote to %v\n", rf.me, args.CandidateId)
 		return
 	}
@@ -302,6 +302,11 @@ func (rf *Raft) checkLogOlderMe(lastLogTerm int, lastLogIndex int) bool {
 		return true
 	}
 	return false
+}
+
+func (rf *Raft) isLogUpToDate(index, term int) bool {
+	lastLog := rf.getLastLog()
+	return term > lastLog.Term || (term == lastLog.Term && index >= lastLog.Index)
 }
 
 // sendRequestVoteToOneWithLock --> sendRequestVote(rpc caller) --> RequestVote (rpc callee)
