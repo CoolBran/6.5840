@@ -9,8 +9,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
 
 const (
@@ -18,7 +17,6 @@ const (
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
 
 type rfsrv struct {
 	ts          *Test
@@ -119,6 +117,9 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 
 // periodically snapshot raft state
 func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
+	rs.mu.Lock()
+	rf := rs.raft
+	rs.mu.Unlock()
 	if rs.raft == nil {
 		return // ???
 	}
@@ -126,7 +127,11 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 	for m := range applyCh {
 		err_msg := ""
 		if m.SnapshotValid {
-			err_msg = rs.ingestSnap(m.Snapshot, m.SnapshotIndex)
+			rs.mu.Lock()
+			if rf.CondInstallSnapshot(m.SnapshotTerm, m.SnapshotTerm, m.Snapshot) {
+				err_msg = rs.ingestSnap(m.Snapshot, m.SnapshotIndex)
+			}
+			rs.mu.Unlock()
 		} else if m.CommandValid {
 			if m.CommandIndex != rs.lastApplied+1 {
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", rs.me, rs.lastApplied+1, m.CommandIndex)
