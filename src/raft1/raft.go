@@ -130,6 +130,10 @@ func (rf *Raft) persist() {
 	rf.persister.Save(rf.encodeState(), nil)
 }
 
+func (rf *Raft) persistWithSnapshot(snapshot []byte) {
+	rf.persister.Save(rf.encodeState(), snapshot)
+}
+
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -381,10 +385,10 @@ func (rf *Raft) sendRequestVoteToOneWithLock(index int) {
 func (rf *Raft) sendEmptyAppendEntriesToOneWithLock(peer int) { //leader use
 	rf.mu.Lock()
 	args := rf.genAppendEntriesArgs(rf.getLastLog().Index)
+	reply := &AppendEntriesReply{}
+	DPrintf("[Leader:%v][empty appendEntries]:send to %v, match: %v next: %v, logSize: %v,logEntry:%v,\n", rf.me, peer, rf.matchIndex[peer], rf.nextIndex[peer], len(args.Entries), args.Entries)
 	rf.mu.Unlock()
 
-	reply := &AppendEntriesReply{}
-	DPrintf("[Leader:%v][empty appendEntries]:send to %v, logSize: %v,logEntry:%v\n", rf.me, peer, len(args.Entries), args.Entries)
 	if ok := rf.sendAppendEntries(peer, args, reply); ok { //net level
 		if !reply.Success { //todo: reply.Term > rf.currentTerm, consider other situation
 			rf.mu.Lock()
@@ -523,6 +527,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = index, index+1
 	for peer := range rf.peers {
 		if peer != rf.me {
+			DPrintf("[Leader:%v]: Signal a peer:%v, match[peer]:%v\n", rf.me, peer, rf.matchIndex[peer])
 			rf.replicatorCond[peer].Signal()
 		}
 	}
@@ -826,6 +831,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if args.LastIncludedIndex <= rf.commitIndex {
 		return
 	}
+	rf.persistWithSnapshot(args.Data)
 
 	go func() {
 		rf.applyCh <- raftapi.ApplyMsg{
@@ -840,27 +846,4 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
-}
-
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	// outdated snapshot
-	if lastIncludedIndex <= rf.commitIndex {
-		DPrintf("{Node %v} rejects outdated snapshot with lastIncludeIndex %v as current commitIndex %v is larger in term %v", rf.me, lastIncludedIndex, rf.commitIndex, rf.currentTerm)
-		return false
-	}
-	// need dummy entry at index 0
-	if lastIncludedIndex > rf.getLastLog().Index {
-		rf.logEntries = make([]LogEntry, 1)
-	} else {
-		rf.logEntries = shrinkEntries(rf.logEntries[lastIncludedIndex-rf.getFirstLog().Index:])
-		rf.logEntries[0].Command = nil
-	}
-	rf.logEntries[0].Term, rf.logEntries[0].Index = lastIncludedTerm, lastIncludedIndex
-	rf.commitIndex, rf.lastApplied = lastIncludedIndex, lastIncludedIndex
-	rf.persister.Save(rf.encodeState(), snapshot)
-
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.role, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
-	return true
 }
