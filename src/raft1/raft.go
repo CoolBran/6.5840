@@ -450,6 +450,8 @@ func (rf *Raft) sendAppendEntriesToOneWithLock(peer int) {
 			}
 			rf.mu.Unlock()
 
+		} else {
+			DPrintf("[sendAppendEntries][fail],fail log:%v\n", args)
 		}
 	}
 
@@ -743,6 +745,7 @@ func (rf *Raft) replicator(peer int) {
 			rf.replicatorCond[peer].Wait()
 		}
 		rf.sendAppendEntriesToOneWithLock(peer)
+		DPrintf("[peer:%v] send append entries to %v end\n", rf.me, peer)
 	}
 }
 
