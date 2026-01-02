@@ -127,7 +127,7 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
-	rf.persister.Save(rf.encodeState(), nil)
+	rf.persister.Save(rf.encodeState(), rf.persister.ReadSnapshot())
 }
 
 func (rf *Raft) persistWithSnapshot(snapshot []byte) {
@@ -187,6 +187,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// remove log entries up to index
 	rf.logEntries = shrinkEntries(rf.logEntries[index-snapshotIndex:])
 	rf.logEntries[0].Command = nil
+	rf.lastApplied, rf.commitIndex = index, index
 	rf.persister.Save(rf.encodeState(), snapshot)
 	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot with index %v", rf.me, rf.role, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index)
 
@@ -651,10 +652,10 @@ func initARaft(rf *Raft, persister *tester.Persister) {
 			go rf.replicator(peer)
 		}
 	}
-	go rf.maintainHearBeatWithLock()
+	go rf.maintainHeartBeatWithLock()
 }
 
-func (rf *Raft) maintainHearBeatWithLock() {
+func (rf *Raft) maintainHeartBeatWithLock() {
 	for !rf.killed() {
 		time.Sleep(100 * time.Millisecond)
 		rf.mu.Lock()
@@ -665,7 +666,9 @@ func (rf *Raft) maintainHearBeatWithLock() {
 			for i := range peersCnt {
 				if i != rf.me {
 					//todo: send 1.empty AppendEntries or 2.AppendEntries with log
-					go rf.sendEmptyAppendEntriesToOneWithLock(i)
+					// go rf.sendEmptyAppendEntriesToOneWithLock(i)
+					DPrintf("[maintainHeartBeat] to peer[%v]", i)
+					go rf.sendAppendEntriesToOneWithLock(i)
 				}
 			}
 		}
@@ -834,7 +837,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if args.LastIncludedIndex <= rf.commitIndex {
 		return
 	}
+	rf.logEntries = []LogEntry{{Term: args.LastIncludedTerm, Index: args.LastIncludedIndex, Command: nil}}
 	rf.persistWithSnapshot(args.Data)
+	rf.lastApplied = args.LastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
 
 	go func() {
 		rf.applyCh <- raftapi.ApplyMsg{
