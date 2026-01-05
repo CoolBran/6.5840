@@ -734,9 +734,6 @@ func (rf *Raft) applier() {
 		}
 		rf.mu.Lock()
 		rf.lastApplied = commitIndex
-		// if rf.role == Leader && rf.lastApplied == rf.getLastLog().Index {
-		// 	rf.retCh <- struct{}{}
-		// }
 		rf.mu.Unlock()
 	}
 }
