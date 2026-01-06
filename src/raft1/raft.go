@@ -37,6 +37,15 @@ import (
 7. think of the Log Compression
 8.
 */
+
+type Op struct {
+	// Your definitions here.
+	// Field names must start with capital letters,
+	// otherwise RPC will break.
+	ID  int
+	Me  int
+	Req any
+}
 type LogEntry struct {
 	Term    int
 	Index   int //first index is 1
@@ -722,6 +731,8 @@ func (rf *Raft) applier() {
 
 		firstLogIndex, commitIndex, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
 		entries := make([]LogEntry, commitIndex-lastApplied)
+		//todo: check the index of entries
+		//[TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable4C]panic: runtime error: slice bounds out of range [-1:]
 		copy(entries, rf.logEntries[lastApplied-firstLogIndex+1:commitIndex-firstLogIndex+1])
 		rf.mu.Unlock()
 		for _, entry := range entries {

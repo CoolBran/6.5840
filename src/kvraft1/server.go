@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -81,18 +82,40 @@ func (kv *KVServer) DoOp(req any) any {
 			if args.Version == 0 {
 				// Key does not exist and version is 0, install the value
 				kv.kvmap[args.Key] = ValueVersion{Value: args.Value, Version: 1}
-				return rpc.PutReply{Err: rpc.OK}
+				res := rpc.PutReply{Err: rpc.OK}
+				kv.clientPutResults[args.ClientId] = ClientPutResult{
+					ReqId:  args.ReqId,
+					Result: res,
+				}
+				return res
+			} else {
+				// Key does not exist and version is not 0, return ErrNoKey
+				res := rpc.PutReply{Err: rpc.ErrNoKey}
+				kv.clientPutResults[args.ClientId] = ClientPutResult{
+					ReqId:  args.ReqId,
+					Result: res,
+				}
+				return res
 			}
-			// Key does not exist and version is not 0, return ErrNoKey
-			return rpc.PutReply{Err: rpc.ErrNoKey}
 		}
 		if args.Version != val.Version {
 			// Version does not match, return ErrVersion
-			return rpc.PutReply{Err: rpc.ErrVersion}
+			res := rpc.PutReply{Err: rpc.ErrVersion}
+			kv.clientPutResults[args.ClientId] = ClientPutResult{
+				ReqId:  args.ReqId,
+				Result: res,
+			}
+			return res
 		}
 		// Version matches, update the value and increment version
 		kv.kvmap[args.Key] = ValueVersion{Value: args.Value, Version: val.Version + 1}
-		return rpc.PutReply{Err: rpc.OK}
+
+		res := rpc.PutReply{Err: rpc.OK}
+		kv.clientPutResults[args.ClientId] = ClientPutResult{
+			ReqId:  args.ReqId,
+			Result: res,
+		}
+		return res
 	case rpc.PutArgs:
 		return kv.DoOp(&args)
 	default:
@@ -104,12 +127,50 @@ func (kv *KVServer) DoOp(req any) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
 
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(kv.kvmap)
+	e.Encode(kv.clientPutResults)
+
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if len(data) == 0 {
+		kv.kvmap = make(map[string]ValueVersion)
+		kv.clientPutResults = make(map[int64]ClientPutResult)
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var snapshot map[string]ValueVersion
+	err := d.Decode(&snapshot)
+	if err != nil {
+		log.Printf("KVServer[%d] restore decode error: %v", kv.me, err)
+		kv.kvmap = make(map[string]ValueVersion)
+		kv.clientPutResults = make(map[int64]ClientPutResult)
+		return
+	}
+	kv.kvmap = snapshot
+
+	var putResults map[int64]ClientPutResult
+	err = d.Decode(&putResults)
+	if err != nil {
+		log.Printf("KVServer[%d] restore decode error (ClientPutResults): %v", kv.me, err)
+		kv.clientPutResults = make(map[int64]ClientPutResult)
+		return
+	}
+	kv.clientPutResults = putResults
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -128,6 +189,17 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
+	if kv.killed() {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+
+	_, isLeader := kv.rsm.Raft().GetState()
+	if !isLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+
 	_, re := kv.rsm.Submit(args)
 	if re == nil {
 		reply.Err = rpc.ErrWrongLeader

@@ -120,6 +120,59 @@ func (rsm *RSM) applier() {
 	}
 }
 
+func (rsm *RSM) applier1() {
+	for msg := range rsm.applyCh {
+
+		if msg.CommandValid {
+			rsm.mu.Lock()
+			op := msg.Command.(Op)
+			ch, hasCh := rsm.notifyCh[msg.CommandIndex]
+			me := rsm.me
+			rsm.mu.Unlock()
+
+			result := rsm.sm.DoOp(op.Req)
+
+			if hasCh {
+				// 非阻塞发送，防止卡死 applier
+				select {
+				case ch <- func() interface{} {
+					if op.Me == me {
+						return result
+					}
+					return nil
+				}():
+				default:
+				}
+			}
+
+			// ⚠️ 只有 Command 才允许触发 snapshot
+			if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() > rsm.maxraftstate {
+				snapshot := rsm.sm.Snapshot()
+				rsm.rf.Snapshot(msg.CommandIndex, snapshot)
+			}
+
+		} else if msg.SnapshotValid {
+			rsm.mu.Lock()
+			rsm.sm.Restore(msg.Snapshot)
+
+			// 清理所有旧的 notify channel
+			for idx, ch := range rsm.notifyCh {
+				ch <- nil
+				delete(rsm.notifyCh, idx)
+			}
+			rsm.mu.Unlock()
+		}
+	}
+
+	// applyCh 关闭，通知所有等待者
+	rsm.mu.Lock()
+	for idx, ch := range rsm.notifyCh {
+		ch <- nil
+		delete(rsm.notifyCh, idx)
+	}
+	rsm.mu.Unlock()
+}
+
 func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
